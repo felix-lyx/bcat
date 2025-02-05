@@ -1,0 +1,29 @@
+types: [incom_ns_arena_u]
+
+max_output_dimension: 4
+train_val_test_ratio: [0.8, 0.1, 0.1]
+t_num: 14
+x_num: 128 # how many to use for model input
+
+mixed_length: ${.t_num} # 0 means all have same length, otherwise, pad to t_num
+
+random_start: # randomly select the time starting idx
+  train: true
+  val: false
+  test: false
+  start_max: 40
+
+# whether to share all channels among equations or use c_mask
+tie_fields: 1
+
+sampler:
+  uniform: 1
+
+  incom_ns_arena_u: 1
+
+incom_ns_arena_u:
+  folder: /data/shared/dataset/pdearena/NavierStokes-2D
+  t_step: 1 # dt=1.5
+  x_num: 128
+  dim: 3
+  c_mask: [1, 1, 1, 0, 0, 0]

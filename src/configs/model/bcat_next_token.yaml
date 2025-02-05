@@ -1,0 +1,30 @@
+name: bcat_next_token_auto
+
+# shared attributes
+n_layer: 12
+dim_emb: 1024
+dim_ffn: 2752
+dropout: 0
+n_head: 8
+norm_first: true
+positional_embedding: null
+qk_norm: 1
+norm: rms # select from [layer, rms]
+activation: swiglu
+rotary: 0
+
+flex_attn: 0
+kv_cache: 1
+
+patch_num: 16 # number of patches per dimension
+
+
+embedder:
+    type: linear
+    dim: ${..dim_emb}
+    patch_num: ${..patch_num}
+
+    time_embed: learnable # select from continuous and learnable
+    max_time_len: 20
+
+    conv_dim: 1024

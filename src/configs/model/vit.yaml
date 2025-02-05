@@ -1,0 +1,37 @@
+name: vit
+
+# shared attributes
+dim_emb: 1024
+dim_ffn: 4096
+
+patch_num: 16 # for input, number of patches per dimension
+patch_num_output: ${.patch_num} # for output, number of patches per dimension
+
+
+embedder:
+    type: conv
+    dim: ${..dim_emb}
+    patch_num: ${..patch_num}
+    patch_num_output: ${..patch_num_output}
+
+    time_embed: learnable # select from continuous and learnable
+    max_time_len: 20
+
+    conv_dim: 32
+    early_conv: 0
+
+    deep: 0
+
+encoder:
+    n_layer: 12
+    dim_emb: ${..dim_emb}
+    dim_ffn: ${..dim_ffn}
+    dropout: 0
+    n_head: 8
+    norm_first: true
+    positional_embedding: null
+    qk_norm: 0
+    norm: rms # select from [layer, rms]
+    activation: gelu
+    rotary: 0
+    

@@ -1,0 +1,37 @@
+name: st_auto
+
+# shared attributes
+n_layer: 12
+dim_emb: 1024
+dim_ffn: 2752
+dropout: 0
+n_head: 8
+norm_first: true
+qk_norm: 1
+norm: rms # select from [layer, group, rms]
+activation: swiglu
+
+time_module: attn
+space_module: attn
+
+modes: 32 # only for afno
+
+rotary: 0
+
+patch_num: 16 # for input, number of patches per dimension
+patch_num_output: ${.patch_num} # for output, number of patches per dimension
+
+
+embedder:
+    type: patch
+    dim: ${..dim_emb}
+    patch_num: ${..patch_num}
+    patch_num_output: ${..patch_num_output}
+
+    time_embed: learnable # select from continuous and learnable
+    max_time_len: 20
+
+    conv_dim: 32
+    early_conv: 0
+
+    deep: 0
