@@ -5,6 +5,7 @@ n_layer: 12
 dim_emb: 1024
 dim_ffn: 2752
 dropout: 0
+attn_dropout: 0
 n_head: 8
 norm_first: true
 positional_embedding: null

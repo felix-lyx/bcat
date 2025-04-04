@@ -12,6 +12,7 @@ from utils.misc import to_cuda, set_worker_sharing_strategy
 from dataset import get_dataset
 from data_utils.collate import custom_collate
 from dadaptation import DAdaptAdan
+from utils.muon import Muon
 
 logger = getLogger()
 
@@ -50,9 +51,7 @@ class Trainer(object):
         self.set_optimizer()
 
         # amp
-        self.scaler = None
-        if params.amp:
-            self.scaler = torch.amp.GradScaler("cpu" if params.cpu else "cuda")
+        self.scaler = torch.amp.GradScaler("cpu" if params.cpu else "cuda", enabled=bool(params.amp))
 
         # validation metrics
         self.metrics = []
@@ -99,10 +98,7 @@ class Trainer(object):
         if not params.use_raw_time:
             self.input_len = params.input_len
             self.output_len = params.data.t_num - self.input_len
-            if params.rollout:
-                self.t = torch.linspace(0, 10, self.input_len + 1, dtype=torch.float32)[None]  # (1, t_num)
-            else:
-                self.t = torch.linspace(0, 10, params.data.t_num, dtype=torch.float32)[None]  # (1, t_num)
+            self.t = torch.linspace(0, 10, params.data.t_num, dtype=torch.float32)[None]  # (1, t_num)
 
     def set_parameters(self):
         """
@@ -142,6 +138,51 @@ class Trainer(object):
                     weight_decay=params.optim.weight_decay,
                     growth_rate=1.05,
                 )
+
+            case "nadam":
+                self.optimizer = torch.optim.NAdam(
+                    self.parameters["model"],
+                    lr=params.optim.lr,
+                    weight_decay=params.optim.weight_decay,
+                    eps=params.optim.get("eps", 1e-8),
+                    betas=(0.9, params.optim.get("beta2", 0.999)),
+                    decoupled_weight_decay=True,
+                )
+
+            case "muon":
+                named_params = []
+                for v in self.modules.values():
+                    named_params.extend([(k, p) for k, p in v.named_parameters() if p.requires_grad])
+
+                # parameters containing these will be sent to adam
+                adam_keys = ["embed"]
+                # adam_keys = ["embedding", "in_proj", "head"]
+
+                muon_params, adam_params = [], []
+                muon_param_count = adam_param_count = 0
+                for n, p in named_params:
+                    if p.requires_grad:
+                        if p.ndim < 2 or any([s in n for s in adam_keys]):
+                            adam_params.append(p)
+                            adam_param_count += p.numel()
+
+                            # if p.ndim >= 2:
+                            #     logger.info(n)
+                        else:
+                            muon_params.append(p)
+                            muon_param_count += p.numel()
+
+                logger.info(f"Muon parameters: {muon_param_count:,}, Adam parameters: {adam_param_count:,}")
+
+                self.optimizer = Muon(
+                    lr=params.optim.lr,
+                    wd=params.optim.weight_decay,
+                    muon_params=muon_params,
+                    adamw_params=adam_params,
+                    adamw_betas=(0.9, params.optim.get("beta2", 0.95)),
+                    adamw_eps=params.optim.get("eps", 1e-8),
+                )
+
             case _:
                 raise ValueError(f"Unknown optimizer type: {params.optim.type}")
 
@@ -200,39 +241,24 @@ class Trainer(object):
 
         params = self.params
 
-        # optimizer
-        optimizer = self.optimizer
-
         if params.accumulate_gradients > 1:
             loss = loss / params.accumulate_gradients
 
-        # regular optimization
-        if not params.amp:
-            loss.backward()
+        # optimizer
 
-            if (self.n_iter + 1) % params.accumulate_gradients == 0:
-                if params.clip_grad_norm > 0:
-                    grad_norm = clip_grad_norm_(self.parameters["model"], params.clip_grad_norm)
-                    self.grad_norm = grad_norm.item()
-                optimizer.step()
-                if self.scheduler is not None:
-                    self.scheduler.step()
-                optimizer.zero_grad()
+        optimizer = self.optimizer
+        self.scaler.scale(loss).backward()
 
-        # AMP optimization
-        else:
-            self.scaler.scale(loss).backward()
-
-            if (self.n_iter + 1) % params.accumulate_gradients == 0:
-                if params.clip_grad_norm > 0:
-                    self.scaler.unscale_(optimizer)
-                    grad_norm = clip_grad_norm_(self.parameters["model"], params.clip_grad_norm)
-                    self.grad_norm = grad_norm.item()
-                self.scaler.step(optimizer)
-                self.scaler.update()
-                if self.scheduler is not None:
-                    self.scheduler.step()
-                optimizer.zero_grad()
+        if (self.n_iter + 1) % params.accumulate_gradients == 0:
+            if params.clip_grad_norm > 0:
+                self.scaler.unscale_(optimizer)
+                grad_norm = clip_grad_norm_(self.parameters["model"], params.clip_grad_norm)
+                self.grad_norm = grad_norm.item()
+            self.scaler.step(optimizer)
+            self.scaler.update()
+            if self.scheduler is not None:
+                self.scheduler.step()
+            optimizer.zero_grad()
 
     def print_stats(self):
         """
@@ -317,7 +343,7 @@ class Trainer(object):
             except RuntimeError:  # remove the 'module.'
                 weights = {name.partition(".")[2]: v for name, v in data[k].items()}
                 v.load_state_dict(weights)
-            v.requires_grad = requires_grad
+            # v.requires_grad = requires_grad
 
         # reload optimizer
         logger.warning("Reloading checkpoint optimizer ...")
@@ -344,7 +370,7 @@ class Trainer(object):
         """
         if not self.params.is_master:
             return
-        if self.params.save_periodic > 0 and self.epoch > 0 and self.epoch % self.params.save_periodic == 0:
+        if self.params.save_periodic > 0 and self.epoch > 0 and (self.epoch + 1) % self.params.save_periodic == 0:
             self.save_checkpoint("periodic-%i" % self.epoch)
 
     def save_best_model(self, scores, prefix=None, suffix=None):
@@ -560,9 +586,8 @@ class Trainer(object):
 
         # prepare data part
 
-        model_input, d = self.prepare_data(
-            samples
-        )  # model_input contains model input args, d contains other attributes
+        model_input, d = self.prepare_data(samples)
+        # model_input contains model input args, d contains other attributes
 
         # forward / loss
 

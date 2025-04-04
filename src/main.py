@@ -24,7 +24,7 @@ np.seterr(divide="raise", under="ignore", over="raise", invalid="raise")
 
 torch._dynamo.config.optimize_ddp = False  # fix an issue when using DDP with torch.compile
 
-wandb.require("legacy-service")  # fix GPU logging issues
+# wandb.require("legacy-service")  # fix GPU logging issues
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")
@@ -71,7 +71,7 @@ def main(params: DictConfig):
         assert torch.cuda.is_available()
     utils.misc.CUDA = not params.cpu
 
-    if params.optim.type in ["adamw", "adan"]:
+    if "warmup" in params.optim:
         if params.optim.warmup is not None and params.optim.warmup < 1:
             params.optim.warmup = max(
                 1, int(params.optim.warmup * params.max_epoch * params.n_steps_per_epoch // params.accumulate_gradients)
@@ -152,25 +152,18 @@ def main(params: DictConfig):
 
             if (params.log_periodic > 0) and (trainer.inner_epoch % params.log_periodic == 0):
                 data_loss = trainer.data_loss / params.log_periodic
+                trainer.data_loss = 0.0
+
                 logger.info(
                     "Epoch {} | step {} | data loss = {:.8f}".format(trainer.epoch, trainer.inner_epoch, data_loss)
                 )
 
-                trainer.data_loss = 0.0
-
             if params.use_wandb:
+                logs = {"data_loss": trainer.data_loss_step, "step": trainer.n_total_iter}
                 if trainer.grad_norm is not None and (trainer.n_iter + 1) % params.accumulate_gradients == 0:
-                    wandb.log(
-                        {
-                            "train": {
-                                "data_loss": trainer.data_loss_step,
-                                "grad_norm": trainer.grad_norm,
-                                "step": trainer.n_total_iter,
-                            }
-                        }
-                    )
-                else:
-                    wandb.log({"train": {"data_loss": trainer.data_loss_step, "step": trainer.n_total_iter}})
+                    logs["grad_norm"] = trainer.grad_norm
+
+                wandb.log({"train": logs})
 
         logger.info(f"============ End of epoch {trainer.epoch} ============")
 
@@ -200,12 +193,11 @@ def main(params: DictConfig):
     max_mem = torch.cuda.max_memory_allocated() / 1024**2
     logger.info("MEM: {:.2f} MB".format(max_mem))
 
-    if params.multi_gpu:
-        torch.distributed.destroy_process_group()
-
-    if params.use_wandb:
-        wandb.finish()
-
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        wandb.finish()
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()

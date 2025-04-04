@@ -1,5 +1,5 @@
 """
-Autoregressive BCAT model. 
+Autoregressive BCAT model.
 """
 
 from logging import getLogger
@@ -15,6 +15,7 @@ from .attention_utils import (
     CustomTransformerEncoderLayer,
     CacheCustomTransformerEncoder,
     CacheCustomTransformerEncoderLayer,
+    DynamicTanh,
 )
 from .embedder import get_embedder
 from .kv_cache import KVCache
@@ -60,6 +61,8 @@ class BCAT(nn.Module):
         match config.get("norm", "layer"):
             case "rms":
                 norm = nn.RMSNorm
+            case "dyt":
+                norm = DynamicTanh
             case _:
                 norm = nn.LayerNorm
 
@@ -68,6 +71,7 @@ class BCAT(nn.Module):
             "nhead": config.n_head,
             "dim_feedforward": config.dim_ffn,
             "dropout": config.dropout,
+            "attn_dropout": config.get("attn_dropout", 0),
             "activation": config.get("activation", "gelu"),
             "norm_first": config.norm_first,
             "norm": norm,

@@ -90,8 +90,8 @@ class Evaluator(object):
         if self.output_len < 5:
             self.validation_metrics.remove("_l2_error_step_5")
 
-        if "_l2_error_int" in self.validation_metrics and "patch_num_output" in self.params.model:
-            patch_num = self.params.model.patch_num_output
+        if "_l2_error_int" in self.validation_metrics and "patch_num" in self.params.model:
+            patch_num = self.params.model.patch_num
             patch_size = self.params.data.x_num // patch_num
             self.boundary_mask = get_boundary_mask(patch_size, patch_num, boundary_width=1)[None, None, :, :, None]
             if not self.params.cpu:
@@ -154,10 +154,17 @@ class Evaluator(object):
                     # NOTE: currently hardcoded
                     model_input["carry_over_c"] = 2
 
+                if self.params.rollout:
+                    mode = "rollout"
+                    model_input["n_total_steps"] = self.params.data.t_num
+                    model_input["normalizer"] = self.trainer.normalize_data
+                else:
+                    mode = "generate"
+
                 with torch.amp.autocast(
                     "cpu" if params.cpu else "cuda", enabled=bool(params.amp), dtype=torch.bfloat16
                 ):
-                    data_output = model("generate", **model_input)  # (bs, output_len, x_num, x_num, data_dim)
+                    data_output = model(mode, **model_input)  # (bs, output_len, x_num, x_num, data_dim)
 
                 # computing eval metrics
 

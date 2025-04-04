@@ -1,5 +1,5 @@
 """
-This file contains attention layers and related utils. 
+This file contains attention layers and related utils.
 """
 
 import math
@@ -32,16 +32,22 @@ class FFN(nn.Module):
     def __init__(self, dim, hidden_dim, act="gelu", dropout=0):
         super().__init__()
 
+        self.fc1 = nn.Linear(dim, hidden_dim)
+
         if act.endswith("glu"):
-            self.fc1 = nn.Linear(dim, hidden_dim * 2)
+            self.fc_gate = nn.Linear(dim, hidden_dim)
         else:
-            self.fc1 = nn.Linear(dim, hidden_dim)
+            self.fc_gate = None
 
         self.activation = get_activation(act)()
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
         self.fc2 = nn.Linear(hidden_dim, dim)
 
     def forward(self, x):
-        return self.fc2(self.activation(self.fc1(x)))
+        if self.fc_gate is None:
+            return self.fc2(self.dropout(self.activation(self.fc1(x))))
+        else:
+            return self.fc2(self.dropout(self.activation(self.fc1(x), self.fc_gate(x))))
 
 
 class MultiheadAttention(nn.Module):
@@ -220,7 +226,8 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
         d_model: int,
         nhead: int,
         dim_feedforward: int = 2048,
-        dropout: float = 0.1,
+        dropout: float = 0,
+        attn_dropout: float = 0,
         activation: Union[str, Callable[[Tensor], Tensor]] = F.relu,
         layer_norm_eps: float = 1e-5,
         norm_first: bool = False,
@@ -236,23 +243,12 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
         super(nn.TransformerEncoderLayer, self).__init__()
 
         if flex_attn:
-            self.self_attn = MultiheadFlexAttention(d_model, nhead, dropout=dropout, bias=bias, qk_norm=qk_norm)
+            self.self_attn = MultiheadFlexAttention(d_model, nhead, dropout=attn_dropout, bias=bias, qk_norm=qk_norm)
         else:
-            self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout, bias=bias, qk_norm=qk_norm)
+            self.self_attn = MultiheadAttention(d_model, nhead, dropout=attn_dropout, bias=bias, qk_norm=qk_norm)
         self.rotary = rotary
 
-        # Implementation of Feedforward model
-        if isinstance(activation, str) and activation.endswith("glu"):
-            self.linear1 = nn.Linear(d_model, dim_feedforward * 2, bias=bias, **factory_kwargs)
-        else:
-            self.linear1 = nn.Linear(d_model, dim_feedforward, bias=bias, **factory_kwargs)
-        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
-        self.linear2 = nn.Linear(dim_feedforward, d_model, bias=bias, **factory_kwargs)
-        if isinstance(activation, str):
-            activation = get_activation(activation)()
-        self.activation = activation
-
-        # self.ffn = FFN(d_model, dim_feedforward, activation, dropout)
+        self.ffn = FFN(d_model, dim_feedforward, activation, dropout)
 
         self.norm_first = norm_first
 
@@ -296,8 +292,7 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
                 is_causal=is_causal,
                 rotary_emb=rotary_emb,
             )
-            x = x + self._ff_block(self.norm2(x))
-            # x = x + self.dropout2(self.ffn(self.norm2(x)))
+            x = x + self.dropout2(self.ffn(self.norm2(x)))
         else:
             x = self.norm1(
                 x
@@ -305,8 +300,7 @@ class CustomTransformerEncoderLayer(nn.TransformerEncoderLayer):
                     x, src_mask, src_key_padding_mask, block_mask=block_mask, is_causal=is_causal, rotary_emb=rotary_emb
                 )
             )
-            x = self.norm2(x + self._ff_block(x))
-            # x = self.norm2(x + self.dropout2(self.ffn(x)))
+            x = self.norm2(x + self.dropout2(self.ffn(x)))
         return x
 
     def _sa_block(
@@ -452,8 +446,7 @@ class CacheCustomTransformerEncoderLayer(CustomTransformerEncoderLayer):
             rotary_emb=rotary_emb,
             cache=cache,
         )
-        x = x + self._ff_block(self.norm2(x))
-        # x = x + self.dropout2(self.ffn(self.norm2(x)))
+        x = x + self.dropout2(self.ffn(self.norm2(x)))
 
         return x
 
@@ -759,16 +752,23 @@ def get_embeddings(size, type=None):
     return patch_embeddings
 
 
-class GeGLU(nn.Module):
-    def forward(self, x):
-        x, gates = x.chunk(2, dim=-1)
-        return x * F.gelu(gates)
+class GLU(nn.Module):
+    def forward(self, x, gates=None):
+        if gates is None:
+            x, gates = x.chunk(2, dim=-1)
+        return self.act(x) * gates
 
 
-class SwiGLU(nn.Module):
-    def forward(self, x):
-        x, gates = x.chunk(2, dim=-1)
-        return x * F.silu(gates)
+class GeGLU(GLU):
+    def __init__(self):
+        super().__init__()
+        self.act = nn.GELU()
+
+
+class SwiGLU(GLU):
+    def __init__(self):
+        super().__init__()
+        self.act = nn.SiLU()
 
 
 def get_activation(act="gelu"):
@@ -905,3 +905,22 @@ class GroupNorm(nn.Module):
 
     def extra_repr(self) -> str:
         return "{num_groups}, {num_channels}, eps={eps}, affine={affine}".format(**self.norm.__dict__)
+
+
+class DynamicTanh(nn.Module):
+    def __init__(self, normalized_shape, alpha_init_value=0.5, **kwargs):
+        super().__init__()
+        self.normalized_shape = normalized_shape
+        self.alpha_init_value = alpha_init_value
+
+        self.alpha = nn.Parameter(torch.ones(1) * alpha_init_value)
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+
+    def forward(self, x):
+        x = torch.tanh(self.alpha * x)
+        x = x * self.weight + self.bias
+        return x
+
+    def extra_repr(self):
+        return f"normalized_shape={self.normalized_shape}, alpha_init_value={self.alpha_init_value}"
