@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .attention_utils import (
     Embedding,
+    CustomTransformerDecoder,
     OperatorDecoderLayer,
     SinusoidalPE,
     LearnablePE,
@@ -14,6 +15,7 @@ from .attention_utils import (
     CustomTransformerEncoderLayer,
     get_block_attn_mask,
     get_embeddings,
+    DynamicTanh,
 )
 from logging import getLogger
 from functools import partial
@@ -43,21 +45,27 @@ class TransformerDataEncoder(nn.Module):
             match config.get("norm", "layer"):
                 case "rms":
                     norm = nn.RMSNorm
+                case "dyt":
+                    norm = DynamicTanh
                 case _:
                     norm = nn.LayerNorm
+            self.flex_attn = config.get("flex_attn", False)
+            kwargs = {
+                "d_model": config.dim_emb,
+                "nhead": config.n_head,
+                "dim_feedforward": config.dim_ffn,
+                "dropout": config.dropout,
+                "attn_dropout": config.get("attn_dropout", 0),
+                "activation": config.get("activation", "gelu"),
+                "norm_first": config.norm_first,
+                "norm": norm,
+                "rotary": config.rotary,
+                "qk_norm": config.get("qk_norm", False),
+                "flex_attn": self.flex_attn,
+            }
 
             self.transformer_encoder = CustomTransformerEncoder(
-                CustomTransformerEncoderLayer(
-                    d_model=config.dim_emb,
-                    nhead=config.n_head,
-                    dim_feedforward=config.dim_ffn,
-                    dropout=config.dropout,
-                    activation=config.get("activation", "gelu"),
-                    norm_first=config.norm_first,
-                    norm=norm,
-                    rotary=config.rotary,
-                    qk_norm=config.get("qk_norm", False),
-                ),
+                CustomTransformerEncoderLayer(**kwargs),
                 num_layers=config.n_layer,
                 norm=norm(config.dim_emb, eps=1e-5) if config.norm_first else None,
                 config=config,
@@ -91,7 +99,7 @@ class DataOperatorDecoder(nn.Module):
     Operator Decoder for data
     """
 
-    def __init__(self, config, output_len=1, space_len=None):
+    def __init__(self, config, space_len=None):
         super().__init__()
 
         self.config = config
@@ -99,6 +107,7 @@ class DataOperatorDecoder(nn.Module):
         self.dim = config.dim_emb
 
         self.time_embed_type = config.get("time_embed", "continuous")
+        output_len = config.get("max_time_len", 10)
         if self.time_embed_type == "continuous":
             self.time_proj = nn.Sequential(
                 nn.Linear(config.query_dim, self.dim),
@@ -106,7 +115,7 @@ class DataOperatorDecoder(nn.Module):
                 nn.Linear(self.dim, self.dim),
             )
         else:
-            self.time_embed = get_embeddings((1, config.get("max_time_len", 10), 1, self.dim))
+            self.time_embeddings = get_embeddings((1, output_len, 1, self.dim))
 
         if space_len is None:
             space_len = config.patch_num_output**2
@@ -135,31 +144,37 @@ class DataOperatorDecoder(nn.Module):
                 self_attn_mask = get_block_attn_mask(
                     block_size=config.patch_num_output * config.patch_num_output, n_repeat=output_len
                 )
-                self.register_buffer("self_attn_mask", self_attn_mask)
+                self.register_buffer("self_attn_mask", self_attn_mask, persistent=False)
         else:
             # cross attn + ffn
 
             match config.get("norm", "layer"):
                 case "rms":
                     norm = nn.RMSNorm
+                case "dyt":
+                    norm = DynamicTanh
                 case _:
                     norm = nn.LayerNorm
+            self.flex_attn = config.get("flex_attn", False)
+            kwargs = {
+                "d_model": config.dim_emb,
+                "nhead": config.n_head,
+                "dim_feedforward": config.dim_ffn,
+                "dropout": config.dropout,
+                "attn_dropout": config.get("attn_dropout", 0),
+                "activation": config.get("activation", "gelu"),
+                "norm_first": config.norm_first,
+                "norm": norm,
+                "rotary": config.rotary,
+                "qk_norm": config.get("qk_norm", False),
+                "flex_attn": self.flex_attn,
+            }
 
-            self.transformer_decoder = nn.TransformerDecoder(
-                OperatorDecoderLayer(
-                    d_model=config.dim_emb,
-                    nhead=config.n_head,
-                    dim_feedforward=config.dim_ffn,
-                    dropout=config.dropout,
-                    activation="gelu",
-                    batch_first=True,
-                    norm_first=config.norm_first,
-                    custom_attn=config.get("custom_attn", 0),
-                    norm=norm,
-                ),
+            self.transformer_decoder = CustomTransformerDecoder(
+                OperatorDecoderLayer(**kwargs),
                 num_layers=config.n_layer,
-                # norm=norm(config.dim_emb) if config.norm_first else None,
                 norm=norm(config.dim_emb) if (config.norm_first and config.final_ln) else None,
+                config=config,
             )
 
     def get_query_emb(self, times):
@@ -176,7 +191,7 @@ class DataOperatorDecoder(nn.Module):
         if self.time_embed_type == "continuous":
             times = self.time_proj(times)[:, :, None]  # (bs/1, output_len, 1, dim)
         else:
-            times = self.time_embed[:, :output_len]  # (1, input_len, 1, dim)
+            times = self.time_embeddings[:, :output_len]  # (1, input_len, 1, dim)
 
         return (times + self.patch_position_embeddings).reshape(bs, -1, self.dim)
 
@@ -219,23 +234,29 @@ class TransformerSymbolEncoder(nn.Module):
             match config.get("norm", "layer"):
                 case "rms":
                     norm = nn.RMSNorm
+                case "dyt":
+                    norm = DynamicTanh
                 case _:
                     norm = nn.LayerNorm
+            self.flex_attn = config.get("flex_attn", False)
+            kwargs = {
+                "d_model": config.dim_emb,
+                "nhead": config.n_head,
+                "dim_feedforward": config.dim_ffn,
+                "dropout": config.dropout,
+                "attn_dropout": config.get("attn_dropout", 0),
+                "activation": config.get("activation", "gelu"),
+                "norm_first": config.norm_first,
+                "norm": norm,
+                "rotary": config.rotary,
+                "qk_norm": config.get("qk_norm", False),
+                "flex_attn": self.flex_attn,
+            }
 
             self.transformer_encoder = CustomTransformerEncoder(
-                CustomTransformerEncoderLayer(
-                    d_model=config.dim_emb,
-                    nhead=config.n_head,
-                    dim_feedforward=config.dim_ffn,
-                    dropout=config.dropout,
-                    activation=config.get("activation", "gelu"),
-                    norm_first=config.norm_first,
-                    norm=norm,
-                    rotary=config.rotary,
-                    qk_norm=config.get("qk_norm", False),
-                ),
+                CustomTransformerEncoderLayer(**kwargs),
                 num_layers=config.n_layer,
-                norm=norm(config.dim_emb) if config.norm_first else None,
+                norm=norm(config.dim_emb, eps=1e-5) if config.norm_first else None,
                 config=config,
             )
 
@@ -297,42 +318,34 @@ class TransformerFusion(nn.Module):
         if config.n_layer == 0:
             self.transformer_encoder = None
         else:
-            if config.get("custom_encoder", 0):
-                match config.get("norm", "layer"):
-                    case "rms":
-                        norm = nn.RMSNorm
-                    case _:
-                        norm = nn.LayerNorm
+            match config.get("norm", "layer"):
+                case "rms":
+                    norm = nn.RMSNorm
+                case "dyt":
+                    norm = DynamicTanh
+                case _:
+                    norm = nn.LayerNorm
+            self.flex_attn = config.get("flex_attn", False)
+            kwargs = {
+                "d_model": config.dim_emb,
+                "nhead": config.n_head,
+                "dim_feedforward": config.dim_ffn,
+                "dropout": config.dropout,
+                "attn_dropout": config.get("attn_dropout", 0),
+                "activation": config.get("activation", "gelu"),
+                "norm_first": config.norm_first,
+                "norm": norm,
+                "rotary": config.rotary,
+                "qk_norm": config.get("qk_norm", False),
+                "flex_attn": self.flex_attn,
+            }
 
-                self.transformer_encoder = CustomTransformerEncoder(
-                    CustomTransformerEncoderLayer(
-                        d_model=config.dim_emb,
-                        nhead=config.n_head,
-                        dim_feedforward=config.dim_ffn,
-                        dropout=config.dropout,
-                        activation="gelu",
-                        norm_first=config.norm_first,
-                        rotary=config.rotary,
-                        norm=norm,
-                    ),
-                    num_layers=config.n_layer,
-                    norm=norm(config.dim_emb) if config.norm_first else None,
-                    config=config,
-                )
-            else:
-                self.transformer_encoder = nn.TransformerEncoder(
-                    nn.TransformerEncoderLayer(
-                        d_model=config.dim_emb,
-                        nhead=config.n_head,
-                        dim_feedforward=config.dim_ffn,
-                        dropout=config.dropout,
-                        activation="gelu",
-                        batch_first=True,
-                        norm_first=config.norm_first,
-                    ),
-                    num_layers=config.n_layer,
-                    norm=nn.LayerNorm(config.dim_emb) if config.norm_first else None,
-                )
+            self.transformer_encoder = CustomTransformerEncoder(
+                CustomTransformerEncoderLayer(**kwargs),
+                num_layers=config.n_layer,
+                norm=norm(config.dim_emb, eps=1e-5) if config.norm_first else None,
+                config=config,
+            )
 
         if config.type_embeddings:
             self.type_embeddings = Embedding(num_types, self.dim)

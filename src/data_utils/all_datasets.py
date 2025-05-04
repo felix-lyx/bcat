@@ -354,7 +354,7 @@ class IncomNS2D(myIterDp):
         self.x_step = params.data.incom_ns.x_num // params.data.x_num
 
         self.folder = params.data.incom_ns.folder
-        self.data_files = sorted(os.listdir(self.folder))
+        self.data_files = sorted([f for f in os.listdir(self.folder) if f.endswith(".h5")])
         self.fully_shuffled = True  # no need to shuffle since we shuffle in __iter__
 
         if self.params.symbol.symbol_input:

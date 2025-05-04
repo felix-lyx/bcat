@@ -1,10 +1,11 @@
 """
-Space Time models. 
+Space Time models.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from .attention_utils import CustomTransformerEncoder, MultiheadAttention, get_activation, GroupNorm, FFN
 from .embedder import get_embedder
@@ -201,7 +202,8 @@ class ST_auto(nn.Module):
         Step 2: Transformer
             data:   Tensor     (bs, t_num-1, patch_num, patch_num, dim)
         """
-        data_encoded = self.transformer(data, is_causal=True)  # (b, t, p, p, d)
+        with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+            data_encoded = self.transformer(data, is_causal=True)  # (b, t, p, p, d)
 
         """
         Step 3: Decode data

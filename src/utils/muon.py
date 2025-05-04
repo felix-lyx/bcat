@@ -71,7 +71,7 @@ class Muon(torch.optim.Optimizer):
         nesterov=True,
         ns_steps=5,
         adamw_params=None,
-        adamw_betas=(0.95, 0.95),
+        adamw_betas=(0.9, 0.95),
         adamw_eps=1e-8,
     ):
 

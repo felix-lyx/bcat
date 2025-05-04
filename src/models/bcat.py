@@ -105,10 +105,8 @@ class BCAT(nn.Module):
             self.block_mask = create_block_mask(
                 partial(block_causal, block_size=block_size), None, None, seq_len, seq_len
             )
-            # seq_len_eval = block_size * 10  # NOTE: hardcoded input length
-            # self.block_mask_eval = create_block_mask(
-            #     partial(block_causal, block_size=block_size), None, None, seq_len_eval, seq_len_eval
-            # )
+            self.block_size = block_size
+            self.block_mask_prefil = None
 
     def summary(self):
         s = "\n"
@@ -202,6 +200,12 @@ class BCAT(nn.Module):
                 config.n_layer, data_input.shape[0], self.mask.size(0), config.n_head, config.dim_emb // config.n_head
             )
 
+        if self.flex_attn and self.block_mask_prefil is None:
+            seq_len_eval = self.block_size * input_len
+            self.block_mask_prefil = create_block_mask(
+                partial(block_causal, block_size=self.block_size), None, None, seq_len_eval, seq_len_eval
+            )
+
         for i in range(output_len):
             cur_data_input = data_all[:, :cur_len]  # (bs, cur_len, x_num, x_num, data_dim)
 
@@ -211,15 +215,18 @@ class BCAT(nn.Module):
                 cur_data_input, times[:, :cur_len], skip_len=skip_len
             )  # (bs, data_len, dim)
 
-            mask = None
+            mask = block_mask = None
             if (not self.config.kv_cache) or i == 0:
-                data_len = cur_len * self.seq_len_per_step
-                mask = self.mask[:data_len, :data_len]
+                if self.flex_attn:
+                    block_mask = self.block_mask_prefil
+                else:
+                    data_len = cur_len * self.seq_len_per_step
+                    mask = self.mask[:data_len, :data_len]
 
             if self.config.kv_cache:
-                cur_data_encoded = self.transformer(cur_data_input, mask, cache=cache)
+                cur_data_encoded = self.transformer(cur_data_input, mask, block_mask=block_mask, cache=cache)
             else:
-                cur_data_encoded = self.transformer(cur_data_input, mask)  # (bs, data_len, dim)
+                cur_data_encoded = self.transformer(cur_data_input, mask, block_mask=block_mask)  # (bs, data_len, dim)
 
             new_output = cur_data_encoded[:, -self.seq_len_per_step :]  # (bs, patch_num*patch_num, dim)
             new_output = self.embedder.decode(new_output)  # (bs, 1, x_num, x_num, data_dim)

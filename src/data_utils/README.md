@@ -9,6 +9,8 @@ For this repository, we require all datasets to have the same space dimensions (
 
 For PDEBench Compressible Navier-Stokes dataset, use `convert_com_ns.py` to downsample the a subset of the dataset from 512x512 to 128x128. 
 
+For PDEBench Incompressible Navier-Stokes dataset, use `convert_incom_ns.py` to downsample the dataset from 512x512 to 128x128. This step is only for data loading speedup and is not necessary, but the data config (`x_num`) needs to be changed without this step. 
+
 For CFDBench dataset, use `convert_cfdbench.py` to upsample the dataset from 64x64 to 128x128 as well as performing train/val/test split.
 
 ## Step 3. Prepare configs.

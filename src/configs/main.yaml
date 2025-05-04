@@ -110,6 +110,7 @@ wandb:
   name: null
   id: null
   log_per_type: true
+  watch: 1
 
 # Seeds (-1 to use timestamp)
 base_seed: -1

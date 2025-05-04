@@ -15,33 +15,36 @@ def build_model(params, model_config, data_config, symbol_env):
     modules = {}
 
     # get model
-    name = model_config.name
+    match model_config.name:
+        case "st_auto":
+            modules["model"] = ST_auto(
+                model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num
+            )
 
-    if name == "st_auto":
-        modules["model"] = ST_auto(model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num)
+        case "bcat_auto":
+            modules["model"] = BCAT(
+                model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num
+            )
 
-    elif name == "bcat_auto":
-        modules["model"] = BCAT(model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num)
+        case "bcat_next_token_auto":
+            modules["model"] = BCAT_causal(
+                model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num
+            )
 
-    elif name == "bcat_next_token_auto":
-        modules["model"] = BCAT_causal(
-            model_config, data_config.x_num, data_config.max_output_dimension, data_config.t_num
-        )
+        case "fno":
+            modules["model"] = FNO(model_config, data_config.max_output_dimension)
 
-    elif name == "fno":
-        modules["model"] = FNO(model_config, data_config.max_output_dimension)
+        case "vit":
+            modules["model"] = ViT(model_config, data_config.x_num, data_config.max_output_dimension)
 
-    elif name == "vit":
-        modules["model"] = ViT(model_config, data_config.x_num, data_config.max_output_dimension)
+        case "unet":
+            modules["model"] = UNet(model_config, data_config.max_output_dimension)
 
-    elif name == "unet":
-        modules["model"] = UNet(model_config, data_config.max_output_dimension)
+        case "deeponet":
+            modules["model"] = DeepONet(model_config, data_config, params.input_len)
 
-    elif name == "deeponet":
-        modules["model"] = DeepONet(model_config, data_config, params.input_len)
-
-    else:
-        assert False, f"Model {name} hasn't been implemented"
+        case _:
+            assert False, f"Model {model_config.name} hasn't been implemented"
 
     # reload pretrained modules
     if params.reload_model:
@@ -49,6 +52,7 @@ def build_model(params, model_config, data_config, symbol_env):
         reloaded = torch.load(params.reload_model, weights_only=False)
         for k, v in modules.items():
             assert k in reloaded, f"{k} not in save"
+
             if all([k2.startswith("module.") for k2 in reloaded[k].keys()]):
                 reloaded[k] = {k2[len("module.") :]: v2 for k2, v2 in reloaded[k].items()}
             if all([k2.startswith("_orig_mod.") for k2 in reloaded[k].keys()]):
@@ -58,6 +62,7 @@ def build_model(params, model_config, data_config, symbol_env):
     # log
     for k, v in modules.items():
         logger.info(f"{k}: {v}")
+
     for k, v in modules.items():
         s = f"Number of parameters ({k}): {sum([p.numel() for p in v.parameters() if p.requires_grad]):,}"
         if hasattr(v, "summary"):

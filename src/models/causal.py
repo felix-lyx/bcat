@@ -14,6 +14,7 @@ from .attention_utils import (
 from .embedder import get_embedder
 from logging import getLogger
 from functools import partial
+from torch.nn.attention import SDPBackend, sdpa_kernel
 from torch.nn.attention.flex_attention import create_block_mask
 from .kv_cache import KVCache
 
@@ -124,7 +125,8 @@ class BCAT_causal(nn.Module):
             block_mask = self.block_mask
             data_encoded = self.transformer(data, block_mask=block_mask)  # (bs, data_len, dim)
         else:
-            data_encoded = self.transformer(data, is_causal=True)  # (bs, data_len, dim)
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                data_encoded = self.transformer(data, is_causal=True)  # (bs, data_len, dim)
 
         """
         Step 3: Decode data
@@ -182,7 +184,10 @@ class BCAT_causal(nn.Module):
         for i in range(output_token_len):
             # (bs, cur_len*p*p, patch_dim=data_dim*patch_res^2) -> (bs, data_len=cur_len*p*p, d)
             skip_len = cache.size if config.kv_cache else 0
-            cur_data_input = self.embedder.pre_proj(all_patches[:, skip_len:cur_len]) + pos_emb[:, skip_len:cur_len]
+            cur_data_input = (
+                self.embedder.pre_proj(self.embedder.in_proj(all_patches[:, skip_len:cur_len]))
+                + pos_emb[:, skip_len:cur_len]
+            )
 
             if self.config.kv_cache:
                 cur_data_encoded = self.transformer(cur_data_input, is_causal=True, cache=cache)
@@ -190,7 +195,7 @@ class BCAT_causal(nn.Module):
                 cur_data_encoded = self.transformer(cur_data_input, is_causal=True)  # (bs, data_len, d)
 
             # (bs, 1, d) -> (bs, 1, patch_dim)
-            new_output = self.embedder.post_proj(cur_data_encoded[:, -1:])
+            new_output = self.embedder.head(self.embedder.post_proj(cur_data_encoded[:, -1:]))
 
             new_output = new_output * token_mask  # (bs, 1, patch_dim)
             all_patches[:, cur_len : cur_len + 1] = new_output

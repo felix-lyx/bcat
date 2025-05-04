@@ -24,8 +24,6 @@ np.seterr(divide="raise", under="ignore", over="raise", invalid="raise")
 
 torch._dynamo.config.optimize_ddp = False  # fix an issue when using DDP with torch.compile
 
-# wandb.require("legacy-service")  # fix GPU logging issues
-
 
 @hydra.main(version_base=None, config_path="configs", config_name="main")
 def main(params: DictConfig):
@@ -126,6 +124,10 @@ def main(params: DictConfig):
 
     symbol_env = SymbolicEnvironment(params.symbol)
     modules = build_model(params, params.model, params.data, symbol_env)
+
+    if params.use_wandb and params.wandb.watch:
+        wandb.watch(modules["model"], log="all")
+
     trainer = Trainer(modules, params, symbol_env)
     evaluator = Evaluator(trainer, symbol_env)
 
@@ -141,6 +143,7 @@ def main(params: DictConfig):
         max_mem = torch.cuda.max_memory_allocated() / 1024**2
         s_mem = "MEM: {:.2f} MB".format(max_mem)
         logger.info(s_mem)
+
         exit()
 
     while trainer.epoch < params.max_epoch:
@@ -193,11 +196,13 @@ def main(params: DictConfig):
     max_mem = torch.cuda.max_memory_allocated() / 1024**2
     logger.info("MEM: {:.2f} MB".format(max_mem))
 
+    if params.use_wandb:
+        wandb.finish()
+
 
 if __name__ == "__main__":
     try:
         main()
     finally:
-        wandb.finish()
         if torch.distributed.is_initialized():
             torch.distributed.destroy_process_group()
